@@ -8,13 +8,14 @@ import numpy as np
 import scipy as sp
 import scipy.stats
 import scipy.optimize
+import unittest
 import warnings
 
 
 THRESHOLD = 1e-5
 
 verbose = False
-debug = True
+debug = False
 logger = None
 warnings.filterwarnings('error')
 
@@ -64,8 +65,8 @@ def load_data(filename):
         # Read Labels
         for line in f:
             task, labeler, label = map(int, line.split())
-            # if verbose:
-            #     logger.info("Read: task({})={} by labeler {}".format(task, label, labeler))
+            if verbose:
+                logger.info("Read: task({})={} by labeler {}".format(task, label, labeler))
             item = Label(taskIdx=task, labelerId=labeler, label=label)
             data.labels.append(item)
     # Initialize Probs
@@ -88,6 +89,7 @@ def EM(data):
 
     EStep(data)
     lastQ = computeQ(data)
+    dQdAlpha, dQdBeta = gradientQ(data)
     MStep(data)
     Q = computeQ(data)
     counter = 1
@@ -119,6 +121,8 @@ def EStep(data):
     data.probZ1 = data.probZ1 / (data.probZ1 + data.probZ0)
     data.probZ0 = 1 - data.probZ1
     # TODO: nan -> abort
+
+    return data
 
 def packX(data):
     return np.r_[data.alpha.copy(), data.beta.copy()]
@@ -292,12 +296,9 @@ if __name__ == '__main__':
     init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument('filename')
-    parser.add_argument('-i', '--input')
-    parser.add_argument('-o', '--output')
-    parser.add_argument('-n', '--data')
-    parser.add_argument('-w', '--workers')
-    parser.add_argument('-k', '--classes')
     parser.add_argument('-v', '--verbose', action='store_true', default=False)
     parser.add_argument('-d', '--debug', action='store_true', default=False)
     args = parser.parse_args()
-    main(args)
+
+    code = main(args)
+    exit(code)
