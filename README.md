@@ -16,11 +16,11 @@ $ python glad.py data/data.txt
 ```
 
 ## Input Format ##
-
+```
   First line:
     <numGivenLabels> <numLabelers> <numTasks> <Prior p(Z=1)>
   Following <numGivenLabels> lines:
     <taskId> <labelerId> <label:0|1>
-
+```
 * The task IDs must be integers and must be 0...<numImages-1>.
 * The labeler IDs must be integers and must be 0...<numLabelers-1>.

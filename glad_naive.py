@@ -17,11 +17,16 @@ THRESHOLD = 1e-5
 verbose = False
 debug = False
 logger = None
-# warnings.filterwarnings('error')
+warnings.filterwarnings('error')
 
+class Label:
+    def __init__(self, taskIdx=-1, labelerId=-1, label=-1):
+        self.taskIdx = taskIdx
+	self.labelerId = labelerId
+	self.label = label
 
-class Dataset(object):
-    def __init__(self, labels=None, numLabels=-1, numLabelers=-1, numTasks=-1,
+class Dataset:
+    def __init__(self, labels=[], numLabels=-1, numLabelers=-1, numTasks=-1,
                  priorAlpha=None, priorBeta=None, priorZ1=None,
                  alpha=None, beta=None, probZ1=None, probZ0=None):
         self.labels = labels
@@ -46,9 +51,6 @@ def init_logger():
 def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
-def logsigmoid(x):
-    return - np.log(1 + np.exp(-x))
-
 def load_data(filename):
     data = Dataset()
     with open(filename) as f:
@@ -61,12 +63,12 @@ def load_data(filename):
         if verbose:
             logger.info('Reading {} labels of {} labelers over {} tasks for prior P(Z=1) = {}'.format(data.numLabels, data.numLabelers, data.numTasks, data.priorZ1))
         # Read Labels
-        data.labels = np.zeros((data.numTasks, data.numLabelers))
         for line in f:
             task, labeler, label = map(int, line.split())
             if verbose:
                 logger.info("Read: task({})={} by labeler {}".format(task, label, labeler))
-            data.labels[task][labeler] = label + 1
+            item = Label(taskIdx=task, labelerId=labeler, label=label)
+            data.labels.append(item)
     # Initialize Probs
     data.priorAlpha = np.ones(data.numLabelers)
     data.priorBeta = np.ones(data.numTasks)
@@ -87,7 +89,6 @@ def EM(data):
 
     EStep(data)
     lastQ = computeQ(data)
-    dQdAlpha, dQdBeta = gradientQ(data)
     MStep(data)
     Q = computeQ(data)
     counter = 1
@@ -102,23 +103,16 @@ def EM(data):
 def EStep(data):
     u"""Evaluate the posterior probability of true labels given observed labels and parameters
     """
-    def calcLogProbL(item, *args):
-        i = item[0]
-        idx = args[0][int(i)]
-        row = item[1:]
-        return logsigmoid(row[idx]).sum() + logsigmoid(-row[np.invert(idx)]).sum()
-
     if verbose: logger.info('EStep')
     data.probZ1 = np.log(data.priorZ1)
     data.probZ0 = np.log(1 - data.priorZ1)
 
-    ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
-    ab[data.labels == 0] = 0  # drop ab with no response
-    ab = np.c_[np.arange(data.numTasks), ab]
-
-    # TODO: Z1 -> Z2
-    data.probZ1 = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == 2))
-    data.probZ0 = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == 1))
+    for item in data.labels:
+        i = item.labelerId
+        j = item.taskIdx
+        lij = item.label
+        data.probZ1[j] += logProbL(lij, 1, data.alpha[i], data.beta[j])
+        data.probZ0[j] += logProbL(lij, 0, data.alpha[i], data.beta[j])
 
     # Exponentiate and renormalize
     data.probZ1 = np.exp(data.probZ1)
@@ -133,8 +127,8 @@ def packX(data):
     return np.r_[data.alpha.copy(), data.beta.copy()]
 
 def unpackX(x, data):
-    data.alpha = x[:data.numLabelers].copy()
-    data.beta = x[data.numLabelers:].copy()
+    data.alpha = x[:data.numLabelers]
+    data.beta = x[data.numLabelers:]
 
 def getBoundsX(data, alpha=(-100, 100), beta=(-100, 100)):
     alpha_bounds = np.array([[alpha[0], alpha[1]] for i in range(data.numLabelers)])
@@ -183,98 +177,89 @@ def computeQ(data):
     Q += (data.probZ0 * np.log(1 - data.priorZ1)).sum()
 
     # the expectation of the sum of posteriors over all tasks
-    ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
+    for item in data.labels:
+        i = item.labelerId
+        j = item.taskIdx
+        alpha = data.alpha[i]
+        beta = data.beta[j]
+        lij = item.label
+        try:
+            logSigma = - np.log(1 + np.exp(- np.exp(beta) * alpha))
+        except Warning:
+            # For large negative x, -log(1 + exp(-x)) = x
+            logSigma = np.exp(beta) * alpha;
+        try:
+            logOneMinusSigma = - np.log(1 + np.exp(np.exp(beta) * alpha))
+        except Warning:
+            # For large positive x, -log(1 + exp(x)) = x
+            logOneMinusSigma = - np.exp(beta) * alpha;
 
-    logSigma = - np.log(1 + np.exp(-ab))
-    idxna = np.isnan(logSigma)
-    if np.any(idxna): logger.warning('an invalid value was assigned to np.log [computeQ]')
-    logSigma[idxna] = ab[idxna]  # For large negative x, -log(1 + exp(-x)) = x
-
-    logOneMinusSigma = - np.log(1 + np.exp(ab))
-    idxna = np.isnan(logOneMinusSigma)
-    if np.any(idxna): logger.warning('an invalid value was assigned to np.log [computeQ]')
-    logOneMinusSigma[idxna] = -ab[idxna]  # For large positive x, -log(1 + exp(x)) = x
-
-    # class = 1 :TODO
-    idx = (data.labels == 2)
-    Q += (data.probZ1 * logSigma.T).T[idx].sum()
-    Q += (data.probZ1 * logOneMinusSigma.T).T[np.invert(idx)].sum()
-    # class = 1 :TODO
-    idx = (data.labels == 1)
-    Q += (data.probZ0 * logSigma.T).T[idx].sum()
-    Q += (data.probZ0 * logOneMinusSigma.T).T[np.invert(idx)].sum()
+        Q += data.probZ1[j] * (lij * logSigma + (1 - lij) * logOneMinusSigma) + data.probZ0[j] * ((1 - lij) * logSigma + lij * logOneMinusSigma)
 
     # Add Gaussian (standard normal) prior for alpha
-    Q += np.log(sp.stats.norm.pdf(data.alpha - data.priorAlpha)).sum()
+    try:
+        Q += np.log(sp.stats.norm.pdf(data.alpha - data.priorAlpha)).sum()
+    except Warning:
+        logger.warning('an invalid value was assigned to np.log [computeQ]')
+        Q = np.nan
 
     # Add Gaussian (standard normal) prior for beta
-    Q += np.log(sp.stats.norm.pdf(data.beta - data.priorBeta)).sum()
+    try:
+        Q += np.log(sp.stats.norm.pdf(data.beta - data.priorBeta)).sum()
+    except Warning:
+        logger.warning('an invalid value was assigned to np.log [computeQ]')
+        Q = np.nan
 
     if debug:
         logger.debug('a[0]={} a[1]={} a[2]={} b[0]={}'.format(data.alpha[0], data.alpha[1],
                                                               data.alpha[2], data.beta[0]))
         logger.debug('Q={}'.format(Q))
-    if np.isnan(Q):
-        return -np.inf
     return Q
 
 
 def gradientQ(data):
-    def dAlpha(item, *args):
-        idx = args[0][:, int(item[0])]
-        probZ = args[1]
-        row = item[1:]
-        correct = ((1 - row) * probZ)[idx]
-        wrong = -(row * probZ)[np.invert(idx)]
-        return correct.sum() + wrong.sum()
-
-    def dBeta(item, *args):
-        idx = args[0][int(item[0])]
-        alpha = args[1]
-        row = item[1:]
-        correct = ((1 - row) * alpha)[idx]
-        wrong = -(row * alpha)[np.invert(idx)]
-        return correct.sum() + wrong.sum()
-
     dQdAlpha = - (data.alpha - data.priorAlpha)
     dQdBeta = - (data.beta - data.priorBeta)
 
-    ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
+    for item in data.labels:
+        i = item.labelerId
+        j = item.taskIdx
+        alpha = data.alpha[i]
+        beta = data.beta[j]
+        lij = item.label
+        try:
+            sigma = sigmoid(np.exp(beta) * alpha)
+        except Warning:
+            if alpha < 0:
+                sigma = 0
+            else:
+                raise
 
-    sigma = sigmoid(ab)
-    sigma[data.labels == 0] = 0  # drop ab with no response
-    sigma[np.isnan(sigma)] = 0  # :TODO check if this is correct
-
-    labelersIdx = np.arange(data.numLabelers).reshape((1,data.numLabelers))
-    sigma = np.r_[labelersIdx, sigma]
-    sigma = np.c_[np.arange(-1, data.numTasks), sigma]
-
-
-    # print(data.probZ1 * np.exp(data.beta))
-    dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
-                                    (data.labels == 2), data.probZ1 * np.exp(data.beta))
-    dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
-                                    (data.labels == 1), data.probZ0 * np.exp(data.beta))
-
-    dQdBeta += np.apply_along_axis(dBeta, 1, sigma[1:],
-                                   (data.labels == 2), data.alpha) * data.probZ1 * np.exp(data.beta)
-    dQdBeta += np.apply_along_axis(dBeta, 1, sigma[1:],
-                                   (data.labels == 1), data.alpha) * data.probZ0 * np.exp(data.beta)
-
+        dQdAlpha[i] += (data.probZ1[j] * (lij - sigma) + data.probZ0[j] * (1 - lij - sigma)) * np.exp(beta)
+        dQdBeta[j] += (data.probZ1[j] * (lij - sigma) + data.probZ0[j] * (1 - lij - sigma)) * alpha * np.exp(beta)
     if debug:
         logger.debug('dQdAlpha[0]={} dQdAlpha[1]={} dQdAlpha[2]={} dQdBeta[0]={}'.format(dQdAlpha[0], dQdAlpha[1],
                                                                                          dQdAlpha[2], dQdBeta[0]))
     return dQdAlpha, dQdBeta
 
 
+def logProbL(l, z, alphaI, betaJ):
+    u"""Return log posterior probability of the label given true label, difficulity and ability
+    """
+    if (z == l):
+        p = - np.log(1 + np.exp(- np.exp(betaJ) * alphaI))
+    else:
+        p = - np.log(1 + np.exp(np.exp(betaJ) * alphaI))
+    return p
+
+
 def output(data):
     alpha = np.c_[np.arange(1, data.numLabelers+1), data.alpha]
     np.savetxt('alpha.csv', alpha, fmt=['%d', '%.5f'], delimiter=',', header='id,alpha')
-    beta = np.c_[np.arange(1, data.numTasks+1), np.exp(data.beta)]
+    beta = np.c_[np.arange(1, data.numTasks+1), data.beta]
     np.savetxt('beta.csv', beta, fmt=['%d', '%.5f'], delimiter=',', header='id,beta')
     label = np.c_[np.arange(1, data.numTasks+1), data.probZ0, data.probZ1]
     np.savetxt('label.csv', label, fmt=['%d', '%.5f', '%.5f'], delimiter=',', header='id,z0,z1')
-
 
 def outputResults(data):
     for i in range(data.numLabelers):
@@ -299,8 +284,8 @@ def main(args=None):
     EM(data)
 
     output(data)
-    # outputResults(data)
-    return
+    outputResults(data)
+    return 0
 
 
 if __name__ == '__main__':
