@@ -21,21 +21,20 @@ logger = None
 
 
 class Dataset(object):
-    def __init__(self, labels=None,
-                 numLabels=-1, numLabelers=-1, numTasks=-1, numClasses=-1,
-                 priorAlpha=None, priorBeta=None, priorZ=None,
-                 alpha=None, beta=None, probZ=None):
+    def __init__(self, labels=None, numLabels=-1, numLabelers=-1, numTasks=-1,
+                 priorAlpha=None, priorBeta=None, priorZ1=None,
+                 alpha=None, beta=None, probZ1=None, probZ0=None):
         self.labels = labels
 	self.numLabels = numLabels
 	self.numLabelers = numLabelers
 	self.numTasks = numTasks
-        self.numClasses = numClasses
 	self.priorAlpha = priorAlpha
 	self.priorBeta = priorBeta
-	self.priorZ = priorZ
+	self.priorZ1 = priorZ1
 	self.alpha = alpha
         self.beta = beta
-	self.probZ = probZ
+	self.probZ1 = probZ1
+        self.probZ0 = probZ0
 
 def init_logger():
     global logger
@@ -58,24 +57,22 @@ def load_data(filename):
         data.numLabels = int(header[0])
         data.numLabelers = int(header[1])
         data.numTasks = int(header[2])
-        data.numClasses = int(header[3])
-        data.priorZ = np.array(map(float, header[4:]))
-        assert len(data.priorZ) == data.numClasses, 'Incorrect input header'
-        assert data.priorZ.sum() == 1, 'Incorrect priorZ given'
+        data.priorZ1 = float(header[3])
         if verbose:
-            logger.info('Reading {} labels of {} labelers over {} tasks for prior P(Z) = {}'.format(data.numLabels, data.numLabelers, data.numTasks, data.priorZ))
+            logger.info('Reading {} labels of {} labelers over {} tasks for prior P(Z=1) = {}'.format(data.numLabels, data.numLabelers, data.numTasks, data.priorZ1))
         # Read Labels
         data.labels = np.zeros((data.numTasks, data.numLabelers))
         for line in f:
             task, labeler, label = map(int, line.split())
-            if debug:
+            if verbose:
                 logger.info("Read: task({})={} by labeler {}".format(task, label, labeler))
             data.labels[task][labeler] = label + 1
     # Initialize Probs
     data.priorAlpha = np.ones(data.numLabelers)
     data.priorBeta = np.ones(data.numTasks)
-    data.probZ = np.empty((data.numTasks, data.numClasses))
-    # data.priorZ = (np.zeros((data.numClasses, data.numTasks)).T + data.priorZ).T
+    data.probZ1 = np.empty(data.numTasks)
+    data.probZ0 = np.empty(data.numTasks)
+    data.priorZ1 = np.zeros(data.numTasks) + data.priorZ1
     data.beta = np.empty(data.numTasks)
     data.alpha = np.empty(data.numLabelers)
 
@@ -90,6 +87,7 @@ def EM(data):
 
     EStep(data)
     lastQ = computeQ(data)
+    dQdAlpha, dQdBeta = gradientQ(data)
     MStep(data)
     Q = computeQ(data)
     counter = 1
@@ -108,25 +106,26 @@ def EStep(data):
         i = item[0]
         idx = args[0][int(i)]
         row = item[1:]
-        correct = logsigmoid(row[idx]).sum()
-        wrong = logsigmoid(-row[np.invert(idx)]).sum()
-        return correct + wrong / float(data.numClasses - 1)
+        return logsigmoid(row[idx]).sum() + logsigmoid(-row[np.invert(idx)]).sum()
 
     if verbose: logger.info('EStep')
-    data.probZ = np.tile(np.log(data.priorZ), data.numTasks).reshape(data.numTasks, data.numClasses)
+    data.probZ1 = np.log(data.priorZ1)
+    data.probZ0 = np.log(1 - data.priorZ1)
 
     ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
     ab[data.labels == 0] = 0  # drop ab with no response
     ab = np.c_[np.arange(data.numTasks), ab]
 
-    for i in range(data.numClasses):
-        data.probZ[:, i] = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == i + 1))
+    # TODO: Z1 -> Z2
+    data.probZ1 = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == 2))
+    data.probZ0 = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == 1))
 
     # Exponentiate and renormalize
-    data.probZ = np.exp(data.probZ)
-    s = data.probZ.sum(axis=1)
-    data.probZ = (data.probZ.T / s).T
-    assert not np.any(np.isnan(data.probZ)), 'Invalid Value [EStep]'
+    data.probZ1 = np.exp(data.probZ1)
+    data.probZ0 = np.exp(data.probZ0)
+    data.probZ1 = data.probZ1 / (data.probZ1 + data.probZ0)
+    data.probZ0 = 1 - data.probZ1
+    # TODO: nan -> abort
 
     return data
 
@@ -147,9 +146,9 @@ def f(x, *args):
     """
     data = args[0]
     d = Dataset(labels=data.labels, numLabels=data.numLabels, numLabelers=data.numLabelers,
-                numTasks=data.numTasks, numClasses=data.numClasses,
-                priorAlpha=data.priorAlpha, priorBeta=data.priorBeta,
-                priorZ=data.priorZ, probZ=data.probZ)
+                numTasks=data.numTasks,
+                priorAlpha=data.priorAlpha, priorBeta=data.priorBeta, priorZ1=data.priorZ1,
+                probZ1=data.probZ1, probZ0=data.probZ0)
     unpackX(x, d)
     return - computeQ(d)
 
@@ -158,9 +157,9 @@ def df(x, *args):
     """
     data = args[0]
     d = Dataset(labels=data.labels, numLabels=data.numLabels, numLabelers=data.numLabelers,
-                numTasks=data.numTasks, numClasses=data.numClasses,
-                priorAlpha=data.priorAlpha, priorBeta=data.priorBeta,
-                priorZ=data.priorZ, probZ=data.probZ)
+                numTasks=data.numTasks,
+                priorAlpha=data.priorAlpha, priorBeta=data.priorBeta, priorZ1=data.priorZ1,
+                probZ1=data.probZ1, probZ0=data.probZ0)
     unpackX(x, d)
     dQdAlpha, dQdBeta = gradientQ(d)
     # Flip the sign since we want to minimize
@@ -180,7 +179,8 @@ def computeQ(data):
     """
     Q = 0
     # Start with the expectation of the sum of priors over all tasks
-    Q += (data.probZ * np.log(data.priorZ)).sum()
+    Q += (data.probZ1 * np.log(data.priorZ1)).sum()
+    Q += (data.probZ0 * np.log(1 - data.priorZ1)).sum()
 
     # the expectation of the sum of posteriors over all tasks
     ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
@@ -195,10 +195,14 @@ def computeQ(data):
     if np.any(idxna): logger.warning('an invalid value was assigned to np.log [computeQ]')
     logOneMinusSigma[idxna] = -ab[idxna]  # For large positive x, -log(1 + exp(x)) = x
 
-    for i in range(data.numClasses):
-        idx = (data.labels == i + 1)
-        Q += (data.probZ[:, i] * logSigma.T).T[idx].sum()
-        Q += (data.probZ[:, i] * logOneMinusSigma.T).T[np.invert(idx)].sum()
+    # class = 1 :TODO
+    idx = (data.labels == 2)
+    Q += (data.probZ1 * logSigma.T).T[idx].sum()
+    Q += (data.probZ1 * logOneMinusSigma.T).T[np.invert(idx)].sum()
+    # class = 1 :TODO
+    idx = (data.labels == 1)
+    Q += (data.probZ0 * logSigma.T).T[idx].sum()
+    Q += (data.probZ0 * logOneMinusSigma.T).T[np.invert(idx)].sum()
 
     # Add Gaussian (standard normal) prior for alpha
     Q += np.log(sp.stats.norm.pdf(data.alpha - data.priorAlpha)).sum()
@@ -232,7 +236,6 @@ def gradientQ(data):
         wrong = -(row * alpha)[np.invert(idx)]
         return correct.sum() + wrong.sum()
 
-    # prior prob.
     dQdAlpha = - (data.alpha - data.priorAlpha)
     dQdBeta = - (data.beta - data.priorBeta)
 
@@ -247,13 +250,16 @@ def gradientQ(data):
     sigma = np.c_[np.arange(-1, data.numTasks), sigma]
 
 
-    for i in range(data.numClasses):
-        dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
-                                        (data.labels == i + 1), data.probZ[:, i] * np.exp(data.beta))
+    # print(data.probZ1 * np.exp(data.beta))
+    dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
+                                    (data.labels == 2), data.probZ1 * np.exp(data.beta))
+    dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
+                                    (data.labels == 1), data.probZ0 * np.exp(data.beta))
 
-        dQdBeta += np.apply_along_axis(dBeta, 1, sigma[1:],
-                                       (data.labels == i + 1),
-                                       data.alpha) * data.probZ[:, i] * np.exp(data.beta)
+    dQdBeta += np.apply_along_axis(dBeta, 1, sigma[1:],
+                                   (data.labels == 2), data.alpha) * data.probZ1 * np.exp(data.beta)
+    dQdBeta += np.apply_along_axis(dBeta, 1, sigma[1:],
+                                   (data.labels == 1), data.alpha) * data.probZ0 * np.exp(data.beta)
 
     if debug:
         logger.debug('dQdAlpha[0]={} dQdAlpha[1]={} dQdAlpha[2]={} dQdBeta[0]={}'.format(dQdAlpha[0], dQdAlpha[1],
@@ -266,8 +272,8 @@ def output(data):
     np.savetxt('alpha.csv', alpha, fmt=['%d', '%.5f'], delimiter=',', header='id,alpha')
     beta = np.c_[np.arange(1, data.numTasks+1), np.exp(data.beta)]
     np.savetxt('beta.csv', beta, fmt=['%d', '%.5f'], delimiter=',', header='id,beta')
-    label = np.c_[np.arange(1, data.numTasks+1), data.probZ]
-    np.savetxt('label.csv', label, fmt=['%d', '%.5f', '%.5f'], delimiter=',', header='id,z')
+    label = np.c_[np.arange(1, data.numTasks+1), data.probZ0, data.probZ1]
+    np.savetxt('label.csv', label, fmt=['%d', '%.5f', '%.5f'], delimiter=',', header='id,z0,z1')
 
 
 def outputResults(data):

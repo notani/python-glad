@@ -21,10 +21,10 @@ class TestGLAD(unittest.TestCase):
         self.data.alpha = self.data.priorAlpha.copy()
         self.data.beta = self.data.priorBeta.copy()
         glad.EStep(self.data)
-        np.testing.assert_allclose(self.data.probZ1[:5],
+        np.testing.assert_allclose(self.data.probZ[:5, 1],
                                     [1.000000,1.000000,0.000000,0.000000,0.000000],
                                    atol=1e-3)
-        np.testing.assert_allclose(self.data.probZ0[:5],
+        np.testing.assert_allclose(self.data.probZ[:5, 0],
                                    [0.000000,0.000000,1.000000,1.000000,1.000000],
                                    atol=1e-3)
         Q = glad.computeQ(self.data)
