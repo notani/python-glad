@@ -4,12 +4,13 @@
 import argparse
 import logging
 import math
+import unittest
+import warnings
+
 import numpy as np
 import scipy as sp
 import scipy.stats
 import scipy.optimize
-import unittest
-import warnings
 
 
 THRESHOLD = 1e-5
@@ -26,16 +27,16 @@ class Dataset(object):
                  priorAlpha=None, priorBeta=None, priorZ=None,
                  alpha=None, beta=None, probZ=None):
         self.labels = labels
-	self.numLabels = numLabels
-	self.numLabelers = numLabelers
-	self.numTasks = numTasks
+        self.numLabels = numLabels
+        self.numLabelers = numLabelers
+        self.numTasks = numTasks
         self.numClasses = numClasses
-	self.priorAlpha = priorAlpha
-	self.priorBeta = priorBeta
-	self.priorZ = priorZ
-	self.alpha = alpha
+        self.priorAlpha = priorAlpha
+        self.priorBeta = priorBeta
+        self.priorZ = priorZ
+        self.alpha = alpha
         self.beta = beta
-	self.probZ = probZ
+        self.probZ = probZ
 
 def init_logger():
     global logger
@@ -59,7 +60,7 @@ def load_data(filename):
         data.numLabelers = int(header[1])
         data.numTasks = int(header[2])
         data.numClasses = int(header[3])
-        data.priorZ = np.array(map(float, header[4:]))
+        data.priorZ = np.array([float(v) for v in header[4:]])
         assert len(data.priorZ) == data.numClasses, 'Incorrect input header'
         assert data.priorZ.sum() == 1, 'Incorrect priorZ given'
         if verbose:
