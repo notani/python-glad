@@ -4,20 +4,20 @@
 import argparse
 import logging
 import math
-import unittest
-import warnings
-
 import numpy as np
 import scipy as sp
 import scipy.stats
 import scipy.optimize
-
+import unittest
+import warnings
 
 THRESHOLD = 1e-5
 
 verbose = False
 debug = False
 logger = None
+
+
 # warnings.filterwarnings('error')
 
 
@@ -38,6 +38,7 @@ class Dataset(object):
         self.beta = beta
         self.probZ = probZ
 
+
 def init_logger():
     global logger
     logger = logging.getLogger('GLAD')
@@ -45,11 +46,14 @@ def init_logger():
     log_fmt = '%(asctime)s/%(name)s[%(levelname)s]: %(message)s'
     logging.basicConfig(format=log_fmt)
 
+
 def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
+
 def logsigmoid(x):
     return - np.log(1 + np.exp(-x))
+
 
 def load_data(filename):
     data = Dataset()
@@ -60,11 +64,14 @@ def load_data(filename):
         data.numLabelers = int(header[1])
         data.numTasks = int(header[2])
         data.numClasses = int(header[3])
-        data.priorZ = np.array([float(v) for v in header[4:]])
+        data.priorZ = np.array([float(x) for x in header[4:]])
         assert len(data.priorZ) == data.numClasses, 'Incorrect input header'
         assert data.priorZ.sum() == 1, 'Incorrect priorZ given'
         if verbose:
-            logger.info('Reading {} labels of {} labelers over {} tasks for prior P(Z) = {}'.format(data.numLabels, data.numLabelers, data.numTasks, data.priorZ))
+            logger.info('Reading {} labels of {} labelers over {} tasks for prior P(Z) = {}'.format(data.numLabels,
+                                                                                                    data.numLabelers,
+                                                                                                    data.numTasks,
+                                                                                                    data.priorZ))
         # Read Labels
         data.labels = np.zeros((data.numTasks, data.numLabelers))
         for line in f:
@@ -82,6 +89,7 @@ def load_data(filename):
 
     return data
 
+
 def EM(data):
     u"""Infer true labels, tasks' difficulty and workers' ability
     """
@@ -94,7 +102,7 @@ def EM(data):
     MStep(data)
     Q = computeQ(data)
     counter = 1
-    while abs((Q - lastQ)/lastQ) > THRESHOLD:
+    while abs((Q - lastQ) / lastQ) > THRESHOLD:
         if verbose: logger.info('EM: iter={}'.format(counter))
         lastQ = Q
         EStep(data)
@@ -102,9 +110,11 @@ def EM(data):
         Q = computeQ(data)
         counter += 1
 
+
 def EStep(data):
     u"""Evaluate the posterior probability of true labels given observed labels and parameters
     """
+
     def calcLogProbL(item, *args):
         i = item[0]
         idx = args[0][int(i)]
@@ -131,17 +141,21 @@ def EStep(data):
 
     return data
 
+
 def packX(data):
     return np.r_[data.alpha.copy(), data.beta.copy()]
+
 
 def unpackX(x, data):
     data.alpha = x[:data.numLabelers].copy()
     data.beta = x[data.numLabelers:].copy()
 
+
 def getBoundsX(data, alpha=(-100, 100), beta=(-100, 100)):
     alpha_bounds = np.array([[alpha[0], alpha[1]] for i in range(data.numLabelers)])
     beta_bounds = np.array([[beta[0], beta[1]] for i in range(data.numLabelers)])
     return np.r_[alpha_bounds, beta_bounds]
+
 
 def f(x, *args):
     u"""Return the value of the objective function
@@ -153,6 +167,7 @@ def f(x, *args):
                 priorZ=data.priorZ, probZ=data.probZ)
     unpackX(x, d)
     return - computeQ(d)
+
 
 def df(x, *args):
     u"""Return gradient vector
@@ -167,6 +182,7 @@ def df(x, *args):
     # Flip the sign since we want to minimize
     return np.r_[-dQdAlpha, -dQdBeta]
 
+
 def MStep(data):
     if verbose: logger.info('MStep')
     initial_params = packX(data)
@@ -175,6 +191,7 @@ def MStep(data):
                                   options={'maxiter': 25, 'disp': verbose})
     if debug: logger.debug(params)
     unpackX(params.x, data)
+
 
 def computeQ(data):
     u"""Calculate the expectation of the joint likelihood
@@ -243,10 +260,9 @@ def gradientQ(data):
     sigma[data.labels == 0] = 0  # drop ab with no response
     sigma[np.isnan(sigma)] = 0  # :TODO check if this is correct
 
-    labelersIdx = np.arange(data.numLabelers).reshape((1,data.numLabelers))
+    labelersIdx = np.arange(data.numLabelers).reshape((1, data.numLabelers))
     sigma = np.r_[labelersIdx, sigma]
     sigma = np.c_[np.arange(-1, data.numTasks), sigma]
-
 
     for i in range(data.numClasses):
         dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
@@ -263,12 +279,18 @@ def gradientQ(data):
 
 
 def output(data):
-    alpha = np.c_[np.arange(1, data.numLabelers+1), data.alpha]
-    np.savetxt('alpha.csv', alpha, fmt=['%d', '%.5f'], delimiter=',', header='id,alpha')
-    beta = np.c_[np.arange(1, data.numTasks+1), np.exp(data.beta)]
-    np.savetxt('beta.csv', beta, fmt=['%d', '%.5f'], delimiter=',', header='id,beta')
-    label = np.c_[np.arange(1, data.numTasks+1), data.probZ]
-    np.savetxt('label.csv', label, fmt=['%d', '%.5f', '%.5f'], delimiter=',', header='id,z')
+    alpha = np.c_[np.arange(data.numLabelers), data.alpha]
+    np.savetxt('data/alpha.csv', alpha, fmt=['%d', '%.5f'], delimiter=',', header='id,alpha')
+    beta = np.c_[np.arange(data.numTasks), np.exp(data.beta)]
+    np.savetxt('data/beta.csv', beta, fmt=['%d', '%.5f'], delimiter=',', header='id,beta')
+    probZ = np.c_[np.arange(data.numTasks), data.probZ]
+    np.savetxt(fname='data/probZ.csv',
+               X=probZ,
+               fmt=['%d'] + (['%.5f'] * data.numClasses),
+               delimiter=',',
+               header='id,' + ','.join(['z' + str(i) for i in range(data.numClasses)]))
+    label = np.c_[np.arange(data.numTasks), np.argmax(data.probZ, axis=1)]
+    np.savetxt('data/label_glad.csv', label, fmt=['%d', '%d'], delimiter=',', header='id,label')
 
 
 def outputResults(data):
