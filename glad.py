@@ -96,6 +96,7 @@ def EM(data):
     # Initialize parameters to starting values
     data.alpha = data.priorAlpha.copy()
     data.beta = data.priorBeta.copy()
+    data.probZ[:] = data.priorZ[:]
 
     EStep(data)
     lastQ = computeQ(data)
@@ -116,12 +117,22 @@ def EStep(data):
     """
 
     def calcLogProbL(item, *args):
-        i = item[0]
-        idx = args[0][int(i)]
-        row = item[1:]
-        correct = logsigmoid(row[idx]).sum()
-        wrong = logsigmoid(-row[np.invert(idx)]).sum()
-        return correct + wrong / float(data.numClasses - 1)
+        j = item[0]  # task ID
+
+        # List[boolean]: denotes if the worker i picked the focused class for the task j
+        ## formally, delta[i, j] = True if l_ij == z_j for i = 0, ..., m-1 (m=# of workers)
+        delta = args[0][int(j)]
+
+        # List[float]: alpha_i * exp(beta_j) for i = 0, ..., m-1
+        exponents = item[1:]
+
+        # Log likelihood for the observations s.t. l_ij == z_j
+        correct = logsigmoid(exponents[delta]).sum()
+        # Log likelihood for the observations s.t. l_ij != z_j
+        wrong = (logsigmoid(-exponents[~delta]) - np.log(float(data.numClasses - 1))).sum()
+
+        # Return log likelihood
+        return correct + wrong
 
     if verbose: logger.info('EStep')
     data.probZ = np.tile(np.log(data.priorZ), data.numTasks).reshape(data.numTasks, data.numClasses)
@@ -130,14 +141,15 @@ def EStep(data):
     ab[data.labels == 0] = 0  # drop ab with no response
     ab = np.c_[np.arange(data.numTasks), ab]
 
-    for i in range(data.numClasses):
-        data.probZ[:, i] = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == i + 1))
+    for k in range(data.numClasses):
+        data.probZ[:, k] = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == k + 1))
 
     # Exponentiate and renormalize
     data.probZ = np.exp(data.probZ)
     s = data.probZ.sum(axis=1)
     data.probZ = (data.probZ.T / s).T
     assert not np.any(np.isnan(data.probZ)), 'Invalid Value [EStep]'
+    assert not np.any(np.isinf(data.probZ)), 'Invalid Value [EStep]'
 
     return data
 
@@ -180,6 +192,10 @@ def df(x, *args):
     unpackX(x, d)
     dQdAlpha, dQdBeta = gradientQ(d)
     # Flip the sign since we want to minimize
+    assert not np.any(np.isinf(dQdAlpha)), 'Invalid Gradient Value [Alpha]'
+    assert not np.any(np.isinf(dQdBeta)), 'Invalid Gradient Value [Beta]'
+    assert not np.any(np.isnan(dQdAlpha)), 'Invalid Gradient Value [Alpha]'
+    assert not np.any(np.isnan(dQdBeta)), 'Invalid Gradient Value [Beta]'
     return np.r_[-dQdAlpha, -dQdBeta]
 
 
@@ -189,7 +205,8 @@ def MStep(data):
     params = sp.optimize.minimize(fun=f, x0=initial_params, args=(data,), method='CG',
                                   jac=df, tol=0.01,
                                   options={'maxiter': 25, 'disp': verbose})
-    if debug: logger.debug(params)
+    if debug:
+        logger.debug(params)
     unpackX(params.x, data)
 
 
@@ -203,20 +220,24 @@ def computeQ(data):
     # the expectation of the sum of posteriors over all tasks
     ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
 
-    logSigma = - np.log(1 + np.exp(-ab))
+    # logSigma = - np.log(1 + np.exp(-ab))
+    logSigma = logsigmoid(ab)  # logP
     idxna = np.isnan(logSigma)
-    if np.any(idxna): logger.warning('an invalid value was assigned to np.log [computeQ]')
-    logSigma[idxna] = ab[idxna]  # For large negative x, -log(1 + exp(-x)) = x
+    if np.any(idxna):
+        logger.warning('an invalid value was assigned to np.log [computeQ]')
+        logSigma[idxna] = ab[idxna]  # For large negative x, -log(1 + exp(-x)) = x
 
-    logOneMinusSigma = - np.log(1 + np.exp(ab))
+    # logOneMinusSigma = - np.log(1 + np.exp(ab))
+    logOneMinusSigma = logsigmoid(-ab) - np.log(float(data.numClasses - 1))  # log((1-P)/(K-1))
     idxna = np.isnan(logOneMinusSigma)
-    if np.any(idxna): logger.warning('an invalid value was assigned to np.log [computeQ]')
-    logOneMinusSigma[idxna] = -ab[idxna]  # For large positive x, -log(1 + exp(x)) = x
+    if np.any(idxna):
+        logger.warning('an invalid value was assigned to np.log [computeQ]')
+        logOneMinusSigma[idxna] = -ab[idxna]  # For large positive x, -log(1 + exp(x)) = x
 
-    for i in range(data.numClasses):
-        idx = (data.labels == i + 1)
-        Q += (data.probZ[:, i] * logSigma.T).T[idx].sum()
-        Q += (data.probZ[:, i] * logOneMinusSigma.T).T[np.invert(idx)].sum()
+    for k in range(data.numClasses):
+        delta = (data.labels == k + 1)
+        Q += (data.probZ[:, k] * logSigma.T).T[delta].sum()
+        Q += (data.probZ[:, k] * logOneMinusSigma.T).T[~delta].sum()
 
     # Add Gaussian (standard normal) prior for alpha
     Q += np.log(sp.stats.norm.pdf(data.alpha - data.priorAlpha)).sum()
@@ -235,19 +256,36 @@ def computeQ(data):
 
 def gradientQ(data):
     def dAlpha(item, *args):
-        idx = args[0][:, int(item[0])]
+        i = int(item[0])  # worker ID
+        sigma_ab = item[1:] # List[float], dim=(n,): sigmoid(alpha_i * beta_j) for j = 0, ..., n-1
+
+        # List[boolean], dim=(n,): denotes if the worker i picked the focused class for
+        # task j (j=0, ..., n-1)
+        delta = args[0][:, i]
+
+        # List[float], dim=(n,): Prob of the true label of the task j being the focused class (p^k)
         probZ = args[1]
-        row = item[1:]
-        correct = ((1 - row) * probZ)[idx]
-        wrong = -(row * probZ)[np.invert(idx)]
+
+        correct = probZ[delta] * np.exp(data.beta[delta]) * (1 - sigma_ab[delta])
+        wrong = probZ[~delta] * np.exp(data.beta[~delta]) * (-sigma_ab[~delta])
+        # Note: The formula in Whitehill et al.'s appendix has the term ln(K-1), which is incorrect.
+
         return correct.sum() + wrong.sum()
 
     def dBeta(item, *args):
-        idx = args[0][int(item[0])]
-        alpha = args[1]
-        row = item[1:]
-        correct = ((1 - row) * alpha)[idx]
-        wrong = -(row * alpha)[np.invert(idx)]
+        j = int(item[0])  # task ID
+        sigma_ab = item[1:] # List[float], dim=(m,): sigmoid(alpha_i * beta_j) for i = 0, ..., m-1
+
+        # List[boolean], dim=(m,): denotes if the worker i picked the focused class for
+        # task j (i=0, ..., m-1)
+        delta = args[0][j]
+
+        # float: Prob of the true label of the task j being the focused class (p^k)
+        probZ = args[1][j]
+
+        correct = probZ * data.alpha[delta] * (1 - sigma_ab[delta])
+        wrong = probZ * data.alpha[~delta] * (-sigma_ab[~delta])
+
         return correct.sum() + wrong.sum()
 
     # prior prob.
@@ -263,14 +301,18 @@ def gradientQ(data):
     labelersIdx = np.arange(data.numLabelers).reshape((1, data.numLabelers))
     sigma = np.r_[labelersIdx, sigma]
     sigma = np.c_[np.arange(-1, data.numTasks), sigma]
+    # sigma: List[List[float]]: dim=(n+1, m+1) where n = # of tasks and m = # of workers
+    # sigma[0] = List[float]: worker IDs (-1, 0, ..., m-1) where the first -1 is a pad
+    # sigma[:, 0] = List[float]: task IDs (-1, 0, ..., n-1) where the first -1 is a pad
 
-    for i in range(data.numClasses):
+    for k in range(data.numClasses):
         dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
-                                        (data.labels == i + 1), data.probZ[:, i] * np.exp(data.beta))
+                                        (data.labels == k + 1),
+                                        data.probZ[:, k])
 
         dQdBeta += np.apply_along_axis(dBeta, 1, sigma[1:],
-                                       (data.labels == i + 1),
-                                       data.alpha) * data.probZ[:, i] * np.exp(data.beta)
+                                       (data.labels == k + 1),
+                                       data.probZ[:, k]) * np.exp(data.beta)
 
     if debug:
         logger.debug('dQdAlpha[0]={} dQdAlpha[1]={} dQdAlpha[2]={} dQdBeta[0]={}'.format(dQdAlpha[0], dQdAlpha[1],
@@ -288,7 +330,7 @@ def output(data):
                X=probZ,
                fmt=['%d'] + (['%.5f'] * data.numClasses),
                delimiter=',',
-               header='id,' + ','.join(['z' + str(i) for i in range(data.numClasses)]))
+               header='id,' + ','.join(['z' + str(k) for k in range(data.numClasses)]))
     label = np.c_[np.arange(data.numTasks), np.argmax(data.probZ, axis=1)]
     np.savetxt('data/label_glad.csv', label, fmt=['%d', '%d'], delimiter=',', header='id,label')
 
