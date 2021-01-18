@@ -117,11 +117,13 @@ def EStep(data):
     """
 
     def calcLogProbL(item, *args):
-        j = item[0]  # task ID
+        j = int(item[0])  # task ID
 
         # List[boolean]: denotes if the worker i picked the focused class for the task j
         ## formally, delta[i, j] = True if l_ij == z_j for i = 0, ..., m-1 (m=# of workers)
-        delta = args[0][int(j)]
+        delta = args[0][j]
+        noResp = args[1][j]
+        oneMinusDelta = (~delta) & (~noResp)
 
         # List[float]: alpha_i * exp(beta_j) for i = 0, ..., m-1
         exponents = item[1:]
@@ -129,7 +131,7 @@ def EStep(data):
         # Log likelihood for the observations s.t. l_ij == z_j
         correct = logsigmoid(exponents[delta]).sum()
         # Log likelihood for the observations s.t. l_ij != z_j
-        wrong = (logsigmoid(-exponents[~delta]) - np.log(float(data.numClasses - 1))).sum()
+        wrong = (logsigmoid(-exponents[oneMinusDelta]) - np.log(float(data.numClasses - 1))).sum()
 
         # Return log likelihood
         return correct + wrong
@@ -138,11 +140,12 @@ def EStep(data):
     data.probZ = np.tile(np.log(data.priorZ), data.numTasks).reshape(data.numTasks, data.numClasses)
 
     ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
-    ab[data.labels == 0] = 0  # drop ab with no response
     ab = np.c_[np.arange(data.numTasks), ab]
 
     for k in range(data.numClasses):
-        data.probZ[:, k] = np.apply_along_axis(calcLogProbL, 1, ab, (data.labels == k + 1))
+        data.probZ[:, k] = np.apply_along_axis(calcLogProbL, 1, ab,
+                                               (data.labels == k + 1),
+                                               (data.labels == 0))
 
     # Exponentiate and renormalize
     data.probZ = np.exp(data.probZ)
@@ -237,7 +240,8 @@ def computeQ(data):
     for k in range(data.numClasses):
         delta = (data.labels == k + 1)
         Q += (data.probZ[:, k] * logSigma.T).T[delta].sum()
-        Q += (data.probZ[:, k] * logOneMinusSigma.T).T[~delta].sum()
+        oneMinusDelta = (data.labels != k + 1) & (data.labels != 0)  # label == 0 -> no response
+        Q += (data.probZ[:, k] * logOneMinusSigma.T).T[oneMinusDelta].sum()
 
     # Add Gaussian (standard normal) prior for alpha
     Q += np.log(sp.stats.norm.pdf(data.alpha - data.priorAlpha)).sum()
@@ -262,13 +266,15 @@ def gradientQ(data):
         # List[boolean], dim=(n,): denotes if the worker i picked the focused class for
         # task j (j=0, ..., n-1)
         delta = args[0][:, i]
+        noResp = args[1][:, i]
+        oneMinusDelta = (~delta) & (~noResp)
 
         # List[float], dim=(n,): Prob of the true label of the task j being the focused class (p^k)
-        probZ = args[1]
+        probZ = args[2]
 
         correct = probZ[delta] * np.exp(data.beta[delta]) * (1 - sigma_ab[delta])
-        wrong = probZ[~delta] * np.exp(data.beta[~delta]) * (-sigma_ab[~delta])
-        # Note: The formula in Whitehill et al.'s appendix has the term ln(K-1), which is incorrect.
+        wrong = probZ[oneMinusDelta] * np.exp(data.beta[oneMinusDelta]) * (-sigma_ab[oneMinusDelta])
+        # Note: The derivative in Whitehill et al.'s appendix has the term ln(K-1), which is incorrect.
 
         return correct.sum() + wrong.sum()
 
@@ -279,12 +285,14 @@ def gradientQ(data):
         # List[boolean], dim=(m,): denotes if the worker i picked the focused class for
         # task j (i=0, ..., m-1)
         delta = args[0][j]
+        noResp = args[1][j]
+        oneMinusDelta = (~delta) & (~noResp)
 
         # float: Prob of the true label of the task j being the focused class (p^k)
-        probZ = args[1][j]
+        probZ = args[2][j]
 
         correct = probZ * data.alpha[delta] * (1 - sigma_ab[delta])
-        wrong = probZ * data.alpha[~delta] * (-sigma_ab[~delta])
+        wrong = probZ * data.alpha[oneMinusDelta] * (-sigma_ab[oneMinusDelta])
 
         return correct.sum() + wrong.sum()
 
@@ -295,7 +303,6 @@ def gradientQ(data):
     ab = np.dot(np.array([np.exp(data.beta)]).T, np.array([data.alpha]))
 
     sigma = sigmoid(ab)
-    sigma[data.labels == 0] = 0  # drop ab with no response
     sigma[np.isnan(sigma)] = 0  # :TODO check if this is correct
 
     labelersIdx = np.arange(data.numLabelers).reshape((1, data.numLabelers))
@@ -308,10 +315,12 @@ def gradientQ(data):
     for k in range(data.numClasses):
         dQdAlpha += np.apply_along_axis(dAlpha, 0, sigma[:, 1:],
                                         (data.labels == k + 1),
+                                        (data.labels == 0),
                                         data.probZ[:, k])
 
         dQdBeta += np.apply_along_axis(dBeta, 1, sigma[1:],
                                        (data.labels == k + 1),
+                                        (data.labels == 0),
                                        data.probZ[:, k]) * np.exp(data.beta)
 
     if debug:
